@@ -45,3 +45,69 @@ def test_stop_kills_relay_that_ignores_termination(tmp_path):
     relay.stop()
     assert process.terminated and process.killed
     assert relay.process is None
+
+
+def _watchdog_supervisor(tmp_path, relay):
+    import asyncio
+    import types
+    from roborock_local_server import server as server_module
+    sup = types.SimpleNamespace(
+        _stop_event=asyncio.Event(),
+        _turn_relay=relay,
+        config=types.SimpleNamespace(turn=types.SimpleNamespace(host="turn.example.com", port=3478)),
+        root_logger=types.SimpleNamespace(info=lambda *a, **k: None, warning=lambda *a, **k: None),
+        _refresh_turn_health=lambda: None,
+    )
+    sup._turn_watchdog_loop = types.MethodType(server_module.ReleaseSupervisor._turn_watchdog_loop, sup)
+    return sup, server_module
+
+
+class FakeRelay:
+    def __init__(self, running=False, ip="192.0.2.1", resolves="192.0.2.1"):
+        self._running = running
+        self.external_ip = ip
+        self.resolves = resolves
+        self.starts = 0
+    @property
+    def running(self):
+        return self._running
+    def resolve_external_ip(self):
+        return self.resolves
+    def stop(self):
+        self._running = False
+    def start(self):
+        self.starts += 1
+        self._running = True
+        self.external_ip = self.resolves
+
+
+def _run_watchdog(tmp_path, monkeypatch, relay, seconds=0.2):
+    import asyncio
+    sup, server_module = _watchdog_supervisor(tmp_path, relay)
+    monkeypatch.setattr(server_module, "TURN_WATCHDOG_INTERVAL_SECONDS", 0.02)
+    monkeypatch.setattr(server_module, "TURN_IP_CHECK_SECONDS", 0.0)
+
+    async def run():
+        task = asyncio.create_task(sup._turn_watchdog_loop())
+        await asyncio.sleep(seconds)
+        sup._stop_event.set()
+        await task
+    asyncio.run(run())
+
+
+def test_watchdog_starts_coturn_again_after_it_exited(tmp_path, monkeypatch):
+    relay = FakeRelay(running=False)
+    _run_watchdog(tmp_path, monkeypatch, relay)
+    assert relay.starts == 1 and relay.running
+
+
+def test_watchdog_restarts_coturn_when_the_public_ip_changes(tmp_path, monkeypatch):
+    relay = FakeRelay(running=True, ip="192.0.2.1", resolves="198.51.100.7")
+    _run_watchdog(tmp_path, monkeypatch, relay)
+    assert relay.starts == 1 and relay.external_ip == "198.51.100.7"
+
+
+def test_watchdog_leaves_a_healthy_relay_alone(tmp_path, monkeypatch):
+    relay = FakeRelay(running=True)
+    _run_watchdog(tmp_path, monkeypatch, relay)
+    assert relay.starts == 0

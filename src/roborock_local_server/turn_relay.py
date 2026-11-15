@@ -23,6 +23,12 @@ class EmbeddedTurnRelay:
         self.state_dir = state_dir
         self.process: subprocess.Popen[bytes] | None = None
         self._exit_warned = False
+        # The address coturn was started with; a dynamic public IP can change under it.
+        self.external_ip: str | None = None
+
+    def resolve_external_ip(self) -> str:
+        addresses = socket.getaddrinfo(self.config.host, self.config.port, socket.AF_INET, socket.SOCK_DGRAM)
+        return addresses[0][4][0]
 
     @property
     def running(self) -> bool:
@@ -37,8 +43,8 @@ class EmbeddedTurnRelay:
     def start(self) -> None:
         if self.config.mode != "provided":
             return
-        addresses = socket.getaddrinfo(self.config.host, self.config.port, socket.AF_INET, socket.SOCK_DGRAM)
-        external_ip = addresses[0][4][0]
+        external_ip = self.resolve_external_ip()
+        self.external_ip = external_ip
         LOG.info("TURN advertised IPv4 address resolved from %s: %s", self.config.host, external_ip)
         self.state_dir.mkdir(parents=True, exist_ok=True)
         config_path = self.state_dir / "turnserver.conf"

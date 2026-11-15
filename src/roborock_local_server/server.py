@@ -14,6 +14,7 @@ import secrets
 import signal
 import socket
 import threading
+import time
 from typing import Any
 from urllib.parse import parse_qs
 
@@ -201,6 +202,12 @@ def _connectivity_check(host: str, port: int) -> None:
         return
 
 
+# The embedded TURN relay is checked this often, its host re-resolved this often, and a failing restart
+# backs off up to this long.
+TURN_WATCHDOG_INTERVAL_SECONDS = 30.0
+TURN_IP_CHECK_SECONDS = 300.0
+TURN_WATCHDOG_MAX_BACKOFF_SECONDS = 600.0
+
 class ManagedFastApiServer:
     """Owns FastAPI/uvicorn lifecycle."""
 
@@ -366,6 +373,7 @@ class ReleaseSupervisor:
         self._mqtt_proxy: MqttTlsProxy | None = None
         self._http_server: ManagedFastApiServer | None = None
         self._renew_task: asyncio.Task[None] | None = None
+        self._turn_watchdog_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
 
         self.certificate_manager = CertificateManager(config=config, paths=paths)
@@ -1953,6 +1961,45 @@ class ReleaseSupervisor:
         await self._start_http_server()
         self._start_mqtt_proxy()
 
+    async def _turn_watchdog_loop(self) -> None:
+        """Keep the embedded TURN relay up: start coturn again when it has exited, and restart it when
+        the TURN host resolves to another address (a dynamic public IP), since coturn advertises the
+        address it was started with. Without this, one exit left camera sessions failing with
+        "request turnserver failed" until the container was restarted."""
+        delay = TURN_WATCHDOG_INTERVAL_SECONDS
+        last_ip_check = 0.0
+        while not self._stop_event.is_set():
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+                return
+            except asyncio.TimeoutError:
+                pass
+            reason = None
+            if not self._turn_relay.running:
+                reason = "coturn is not running"
+            elif time.monotonic() - last_ip_check >= TURN_IP_CHECK_SECONDS:
+                last_ip_check = time.monotonic()
+                try:
+                    ip = await asyncio.to_thread(self._turn_relay.resolve_external_ip)
+                    if self._turn_relay.external_ip and ip != self._turn_relay.external_ip:
+                        reason = f"{self.config.turn.host} now resolves to {ip}"
+                except OSError as exc:
+                    self.root_logger.warning("TURN watchdog could not resolve %s: %s", self.config.turn.host, exc)
+            if reason is None:
+                delay = TURN_WATCHDOG_INTERVAL_SECONDS
+                continue
+            self.root_logger.warning("Restarting the embedded TURN relay: %s", reason)
+            try:
+                await asyncio.to_thread(self._turn_relay.stop)
+                await asyncio.to_thread(self._turn_relay.start)
+                self.root_logger.info("Embedded TURN relay listening on UDP %d", self.config.turn.port)
+                delay = TURN_WATCHDOG_INTERVAL_SECONDS
+            except Exception as exc:  # noqa: BLE001 - keep HTTPS/MQTT running, retry later
+                await asyncio.to_thread(self._turn_relay.stop)
+                self.root_logger.warning("Embedded TURN relay restart failed: %s", exc)
+                delay = min(delay * 2, TURN_WATCHDOG_MAX_BACKOFF_SECONDS)
+            self._refresh_turn_health()
+
     async def _renew_loop(self) -> None:
         interval = max(3600, self.config.tls.renew_check_seconds)
         while not self._stop_event.is_set():
@@ -2027,6 +2074,8 @@ class ReleaseSupervisor:
 
         if self._uses_local_tls() and self.config.tls.mode == "cloudflare_acme":
             self._renew_task = asyncio.create_task(self._renew_loop(), name="tls-renew-loop")
+        if self.config.turn.mode == "provided":
+            self._turn_watchdog_task = asyncio.create_task(self._turn_watchdog_loop(), name="turn-watchdog")
 
     def _start_voice_prefetch(self, bucket: str) -> None:
         """Download every pack of [bucket] in the background; a failed run may be started again later."""
@@ -2057,6 +2106,12 @@ class ReleaseSupervisor:
         self._stop_event.set()
         for task in list(self._voice_prefetch_tasks):
             task.cancel()
+        if self._turn_watchdog_task is not None:
+            self._turn_watchdog_task.cancel()
+            try:
+                await self._turn_watchdog_task
+            except asyncio.CancelledError:
+                pass
         self._turn_relay.stop()
         self._refresh_turn_health()
         if self._renew_task is not None:
