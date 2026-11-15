@@ -79,6 +79,7 @@ class ServerContext:
     turn_password: str = ""
     turn_realm: str = ""
     turn_ttl: int = 86400
+    turn_createca_auth: str = "signed"
     _bootstrap_encryptor: BootstrapEncryptor | None = field(init=False, default=None, repr=False)
     _device_key_cache: DeviceKeyCache | None = field(init=False, default=None, repr=False)
 

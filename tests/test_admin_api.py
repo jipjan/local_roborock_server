@@ -17,7 +17,7 @@ from shared.protocol_auth import ProtocolAuthStore, build_hawk_authorization
 def test_camera_bootstrap_preserves_firmware_contract_and_redacts_persisted_password(tmp_path):
     config_file = write_release_config(tmp_path)
     config = replace(load_config(config_file), turn=TurnConfig(mode="external", host="turn.example.com",
-        username="viewer", password="camera-test-secret", realm="turn.example.com"))
+        username="viewer", password="camera-test-secret", realm="turn.example.com", createca_auth="open"))
     paths = resolve_paths(config_file, config)
     supervisor = ReleaseSupervisor(config=config, paths=paths)
     client = TestClient(supervisor.app)
@@ -33,6 +33,18 @@ def test_camera_bootstrap_preserves_firmware_contract_and_redacts_persisted_pass
     assert entry["response_json"]["data"]["credential"] == "<redacted>"
     assert entry["response_json"]["result"]["pwd"] == "<redacted>"
     assert entry["response_json"]["result"]["credential"] == "<redacted>"
+
+
+def test_camera_bootstrap_refuses_unsigned_requests_by_default(tmp_path):
+    config_file = write_release_config(tmp_path)
+    config = replace(load_config(config_file), turn=TurnConfig(mode="external", host="turn.example.com",
+        username="viewer", password="camera-test-secret", realm="turn.example.com"))
+    assert config.turn.createca_auth == "signed"
+    supervisor = ReleaseSupervisor(config=config, paths=resolve_paths(config_file, config))
+    response = TestClient(supervisor.app).post("/iot.roborock.com/fwapi/createca", json={})
+    payload = response.json()
+    assert payload["code"] == 401
+    assert "camera-test-secret" not in response.text
 
 
 def _scene_zone_step(

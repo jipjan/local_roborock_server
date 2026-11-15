@@ -105,6 +105,27 @@ failure. Coturn logs go to container stdout; configure log retention through you
 container platform. The resolved advertised IPv4 address and unexpected relay
 exit code are logged. TURN passwords are redacted from persisted HTTP responses.
 
+## Who gets the relay credentials
+
+`/fwapi/createca` hands out the TURN username and password, and the camera domain is public, so
+by default the server only answers robots it knows:
+
+```toml
+[turn]
+createca_auth = "signed"   # signed (default) | open
+```
+
+- `signed`: the request must carry a signature that verifies with the public key this server
+  recovered for that robot at onboarding. The Saros 20 Neo (`roborock.vacuum.a296`) posts
+  `did`, `pid`, `uid` and `signature`, an RSA PKCS#1 v1.5 / SHA-256 signature over the fields
+  before it. Any other request gets `code 401` with the relay address and no credentials.
+- `open`: every request gets the credentials, as before. Use it only for a robot whose
+  firmware does not sign the request (the log shows `createca refused` for it) and keep the
+  camera domain off the public internet if you can.
+
+Onboarding's camera preflight accepts the `401` answer when it names the configured relay.
+Robots still get the credentials over MQTT with `get_turn_server`, which needs their own login.
+
 ## Remote-view authentication and activation
 
 Use the existing remote-view PIN from the Roborock app. Convert drawing patterns

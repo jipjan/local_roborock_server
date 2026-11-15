@@ -167,7 +167,12 @@ def _probe_camera_response(*, label: str, expected_host: str, expected_port: int
         matches = any(isinstance(part, dict) and (
             part.get("url") == expected or expected in (part.get("urls") or [])
         ) for part in parts)
-        if not isinstance(payload, dict) or payload.get("code") != 200 or not matches:
+        # A server with createca_auth = "signed" refuses the unsigned probe with code 401 and
+        # names only the relay; that still proves the route reaches this server.
+        signed_refusal = isinstance(payload, dict) and payload.get("code") == 401 and matches and any(
+            isinstance(part, dict) and part.get("signed") for part in parts
+        )
+        if not isinstance(payload, dict) or (payload.get("code") != 200 and not signed_refusal) or not matches:
             raise ValueError("createca response does not match the server's configured TURN endpoint")
     except Exception as exc:
         raise RuntimeError(f"Camera bootstrap route check failed at {label}: verify proxy routing and TURN configuration.") from exc

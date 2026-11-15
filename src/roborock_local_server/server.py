@@ -495,6 +495,7 @@ class ReleaseSupervisor:
             turn_password=self.config.turn.password,
             turn_realm=self.config.turn.realm or self.config.turn.host or self.config.network.stack_fqdn,
             turn_ttl=self.config.turn.ttl,
+            turn_createca_auth=self.config.turn.createca_auth,
         )
         self.endpoint_rules = default_endpoint_rules()
         self.app = self._create_app()

@@ -102,8 +102,12 @@ class TurnConfig:
     password: str = ""
     realm: str = ""
     ttl: int = 86400
+    # "signed": /fwapi/createca hands the relay credentials only to a robot whose request
+    # signature verifies with its recovered public key. "open": to anyone (older behaviour).
+    createca_auth: str = "signed"
 
 
+CREATECA_AUTH_MODES = ("signed", "open")
 VOICE_PACK_MODES = ("mirror", "offline", "disabled")
 
 
@@ -383,10 +387,13 @@ def load_config(path: str | Path) -> AppConfig:
             password=str(turn.get("password", "")).strip(),
             realm=str(turn.get("realm", "") or turn.get("host", "")).strip(),
             ttl=_as_int(turn.get("ttl"), "turn.ttl", 86400),
+            createca_auth=str(turn.get("createca_auth", "signed") or "signed").strip().lower(),
         ),
         voice_packs=VoicePacksConfig(mode=str(voice_packs.get("mode", "mirror")).strip().lower()),
     )
 
+    if config.turn.createca_auth not in CREATECA_AUTH_MODES:
+        raise ValueError(f"turn.createca_auth must be one of: {', '.join(CREATECA_AUTH_MODES)}")
     if len(config.admin.session_secret) < 24:
         raise ValueError("admin.session_secret must be at least 24 characters")
     if "@" not in config.admin.protocol_login_email:

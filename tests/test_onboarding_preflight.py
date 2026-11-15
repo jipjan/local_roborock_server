@@ -110,6 +110,8 @@ def test_camera_requires_server_turn_support_before_pairing(monkeypatch):
 @pytest.mark.parametrize("payload", [
     {"code": 200, "data": {"url": "turn:relay.example:3478"}},
     {"code": 200, "result": {"urls": ["turn:relay.example:3478", "stun:relay.example:3478"]}},
+    # createca_auth = "signed": the unsigned probe is refused, but the relay address matches.
+    {"code": 401, "msg": "robot signature required", "data": {"url": "turn:relay.example:3478", "signed": True}},
 ])
 def test_camera_response_probe_accepts_known_payload_aliases(monkeypatch, payload):
     from io import BytesIO
@@ -121,6 +123,18 @@ def test_camera_response_probe_accepts_known_payload_aliases(monkeypatch, payloa
 def test_camera_response_probe_rejects_wrong_service_without_logging_credentials(monkeypatch):
     from io import BytesIO
     monkeypatch.setattr(onboarding_shared.request, "urlopen", lambda *a, **kw: BytesIO(b'{"ok":true}'))
+    with pytest.raises(RuntimeError, match="verify proxy routing"):
+        _ACTUAL_CAMERA_RESPONSE_PROBE(label="https://vac.cc/fwapi/createca", expected_host="relay.example", expected_port=3478)
+
+
+@pytest.mark.parametrize("payload", [
+    {"code": 401, "data": {"url": "turn:other.example:3478", "signed": True}},
+    {"code": 401, "data": {"url": "turn:relay.example:3478"}},
+])
+def test_camera_response_probe_rejects_other_refusals(monkeypatch, payload):
+    from io import BytesIO
+    import json
+    monkeypatch.setattr(onboarding_shared.request, "urlopen", lambda *a, **kw: BytesIO(json.dumps(payload).encode()))
     with pytest.raises(RuntimeError, match="verify proxy routing"):
         _ACTUAL_CAMERA_RESPONSE_PROBE(label="https://vac.cc/fwapi/createca", expected_host="relay.example", expected_port=3478)
 
