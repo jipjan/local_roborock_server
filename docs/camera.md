@@ -134,6 +134,12 @@ within about 60 seconds. Activation varies by model.
   mappings, firewall rules and the advertised address.
 
 Saros 10R completed a WebRTC handshake with coturn and go2rtc received frames.
+Saros 20 Neo (`roborock.vacuum.a296`) uses `token.r`, as the Qrevo MaxV does. It also reaches
+the API as `api-<token.r>`, so pair it with a `token.r` of at most 15 characters, such as
+`rr.example.cc/`, and route both `rr.example.cc` and `api-rr.example.cc` to this server. With a
+longer `token.r`, `start_camera_preview` fails at once with `-10014` ("request turnserver
+failed") and no bootstrap request arrives. Its live view played in the Roborock app after pairing
+this way.
 Qrevo MaxV completed a forced-relay preview with frames after configuring the
 `token.r` hostname and its explicit port. These observations do not establish
 identical bootstrap or activation behavior on other firmware.
