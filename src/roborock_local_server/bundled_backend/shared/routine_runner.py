@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from enum import Enum
 import json
 import logging
 from pathlib import Path
@@ -74,6 +75,18 @@ _RESUME_COMMAND_BY_IN_CLEANING: dict[int, RoborockCommand] = {
     RoborockInCleaning.zone_clean_not_complete.value: RoborockCommand.RESUME_ZONED_CLEAN,
     RoborockInCleaning.segment_clean_not_complete.value: RoborockCommand.RESUME_SEGMENT_CLEAN,
 }
+
+
+class _ExtraCommand(str, Enum):
+    """Robot commands python-roborock has no name for."""
+
+    APP_SET_CLEAN_SEQUENCE_TYPE = "app_set_clean_sequence_type"
+
+
+# A step's ``seq_type`` 1 is "vacuum first, then mop" (the official app's recommended routine
+# "Vacuum, then mop" stores it). The robot holds that as a setting, so it is switched for the step
+# and switched back afterwards.
+_SEQ_TYPE_VACUUM_THEN_MOP = 1
 
 
 class RoutineExecutionError(RuntimeError):
@@ -339,6 +352,36 @@ def _settings_commands(entry: dict[str, Any]) -> list[RoutineCommand]:
             )
         )
     return commands
+
+
+def _step_entry(step: RoutineStep) -> dict[str, Any] | None:
+    try:
+        if step.method == "do_scenes_app_start":
+            return _single_start_entry(step)
+        return _single_data_entry(step)
+    except RoutineExecutionError:
+        return None
+
+
+def vacuum_then_mop_entry(step: RoutineStep) -> dict[str, Any] | None:
+    """The step's settings when it asks for vacuuming first, then mopping; otherwise None."""
+    entry = _step_entry(step)
+    if entry is None or _as_int(entry.get("seq_type"), 0) != _SEQ_TYPE_VACUUM_THEN_MOP:
+        return None
+    return entry
+
+
+def sequence_command(entry: dict[str, Any], seq_type: int) -> RoutineCommand:
+    """``app_set_clean_sequence_type`` with the step's settings, as the official app sends it."""
+    params: dict[str, Any] = {
+        "fan_power": _as_int(entry.get("fan_power"), 102),
+        "mop_mode": _as_int(entry.get("mop_mode"), 300),
+        "type": seq_type,
+        "water_box_mode": _as_int(entry.get("water_box_mode"), 200),
+    }
+    if seq_type == _SEQ_TYPE_VACUUM_THEN_MOP:
+        params["repeat"] = max(1, _as_int(entry.get("repeat"), 1))
+    return RoutineCommand(_ExtraCommand.APP_SET_CLEAN_SEQUENCE_TYPE, params)  # type: ignore[arg-type]
 
 
 def commands_for_step(step: RoutineStep) -> list[RoutineCommand]:
@@ -934,6 +977,9 @@ class RoutineRunner:
                 await client.send_command(routine_command.command, routine_command.params)
                 return
             except RoborockUnsupportedFeature as exc:
+                if routine_command.command == _ExtraCommand.APP_SET_CLEAN_SEQUENCE_TYPE:
+                    logger.warning("Robot refused the cleaning sequence for step=%s: %s", step.step_id, exc)
+                    return
                 if not _is_optional_unsupported_command(routine_command.command, exc):
                     raise
                 logger.warning(
@@ -945,6 +991,10 @@ class RoutineRunner:
                 )
                 return
             except Exception as exc:  # noqa: BLE001
+                if routine_command.command == _ExtraCommand.APP_SET_CLEAN_SEQUENCE_TYPE:
+                    # Without it the step still cleans, vacuuming and mopping together.
+                    logger.warning("Robot refused the cleaning sequence for step=%s: %s", step.step_id, exc)
+                    return
                 if (
                     routine_command.command in _STEP_START_COMMANDS
                     and attempts < _ACTION_LOCK_RETRY_ATTEMPTS
@@ -965,6 +1015,18 @@ class RoutineRunner:
                     )
                     continue
                 raise
+
+    async def _robot_seq_type(self, client: Any) -> int | None:
+        """The robot's cleaning sequence setting from its status, or None when it does not say."""
+        try:
+            response = await client.send_command(RoborockCommand.GET_STATUS)
+        except Exception:  # noqa: BLE001
+            return None
+        if isinstance(response, list) and response:
+            response = response[0]
+        if not isinstance(response, dict) or "seq_type" not in response:
+            return None
+        return _as_int(response.get("seq_type"), 0)
 
     async def _run_scene(self, *, scene: dict[str, Any], steps: list[RoutineStep]) -> None:
         device_id = scene_device_id(scene)
@@ -992,6 +1054,12 @@ class RoutineRunner:
             for step_index, step in enumerate(steps):
                 commands = commands_for_step(step)
                 waits_for_step_complete = RoborockDataProtocol.TASK_COMPLETE.value in step.finish_dp_ids
+                sequence_entry = vacuum_then_mop_entry(step)
+                previous_seq_type: int | None = None
+                if sequence_entry is not None:
+                    previous_seq_type = await self._robot_seq_type(client)
+                    # Just before the start command, after the suction/water/route settings.
+                    commands.insert(len(commands) - 1, sequence_command(sequence_entry, _SEQ_TYPE_VACUUM_THEN_MOP))
                 for routine_command in commands:
                     logger.info(
                         "Routine step=%s method=%s command=%s params=%s",
@@ -1009,6 +1077,14 @@ class RoutineRunner:
                 if waits_for_step_complete:
                     logger.info("Waiting for ready state step=%s scene=%s", step.step_id, _scene_name(scene))
                     await client.wait_for_step_complete()
+                    if sequence_entry is not None and previous_seq_type is not None and previous_seq_type != _SEQ_TYPE_VACUUM_THEN_MOP:
+                        # Put the robot's own setting back for cleans started outside the routine.
+                        await self._send_step_command(
+                            client=client,
+                            logger=logger,
+                            step=step,
+                            routine_command=sequence_command(sequence_entry, previous_seq_type),
+                        )
                     if step_index < len(steps) - 1:
                         await client.wait_for_dock_settle()
         finally:

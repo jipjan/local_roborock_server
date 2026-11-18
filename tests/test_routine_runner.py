@@ -711,3 +711,84 @@ def test_wait_for_dock_settle_timeout_raises(monkeypatch) -> None:
             await client.wait_for_dock_settle(initial_delay_seconds=0.0)
 
     asyncio.run(exercise())
+
+
+def test_vacuum_then_mop_step_switches_the_sequence_and_back(tmp_path: Path, monkeypatch) -> None:
+    """The official app's recommended "Vacuum, then mop" routine stores seq_type 1 on its step."""
+    async def exercise() -> None:
+        param = {
+            "triggers": [],
+            "action": {"type": "S", "items": [{
+                "id": 1, "type": "CMD", "name": "", "entityId": "dev", "finishDpIds": [130],
+                "param": json.dumps({"id": 1, "method": "do_scenes_app_start", "params": [{
+                    "fan_power": 102, "water_box_mode": 235, "mop_mode": 300, "mop_template_id": 300,
+                    "repeat": 0, "auto_dustCollection": 1, "source": 101, "seq_type": 1,
+                }]}),
+            }]},
+            "matchType": "NONE",
+        }
+        scene = {"id": 7, "name": "Stofzuigen, dan dweilen", "device_id": "dev", "param": json.dumps(param)}
+        sent: list[tuple[object, object]] = []
+
+        class FakeRoutineClient:
+            def __init__(self, context, device, logger) -> None:
+                _ = context, device, logger
+
+            async def connect(self) -> None:
+                return None
+
+            async def close(self) -> None:
+                return None
+
+            async def send_command(self, command, params=None):
+                sent.append((command, params))
+                if command == RoborockCommand.GET_STATUS:
+                    return [{"state": 8, "seq_type": 0}]
+                return ["ok"]
+
+            async def wait_for_step_complete(self) -> None:
+                sent.append(("<step complete>", None))
+
+        monkeypatch.setattr(routine_runner_module, "_RoutineMqttClient", FakeRoutineClient)
+        runner = RoutineRunner(_test_context(tmp_path))
+        await runner._run_scene(scene=scene, steps=parse_scene_steps(scene))
+
+        names = [getattr(c, "value", c) for c, _ in sent]
+        seq = [(i, p) for i, (c, p) in enumerate(sent) if getattr(c, "value", c) == "app_set_clean_sequence_type"]
+        assert [p["type"] for _, p in seq] == [1, 0]
+        assert seq[0][1] == {"fan_power": 102, "mop_mode": 300, "type": 1, "water_box_mode": 235, "repeat": 1}
+        assert seq[0][0] < names.index("app_start") < names.index("<step complete>") < seq[1][0]
+
+    asyncio.run(exercise())
+
+
+def test_steps_without_vacuum_then_mop_leave_the_sequence_alone(tmp_path: Path, monkeypatch) -> None:
+    async def exercise() -> None:
+        scene = _scene(scene_id=4491073, device_id="dev", name="Start")
+        sent: list[object] = []
+
+        class FakeRoutineClient:
+            def __init__(self, context, device, logger) -> None:
+                _ = context, device, logger
+
+            async def connect(self) -> None:
+                return None
+
+            async def close(self) -> None:
+                return None
+
+            async def send_command(self, command, params=None):
+                sent.append(getattr(command, "value", command))
+                return ["ok"]
+
+            async def wait_for_step_complete(self) -> None:
+                return None
+
+        monkeypatch.setattr(routine_runner_module, "_RoutineMqttClient", FakeRoutineClient)
+        runner = RoutineRunner(_test_context(tmp_path))
+        await runner._run_scene(scene=scene, steps=parse_scene_steps(scene))
+        assert "app_set_clean_sequence_type" not in sent
+        assert "get_status" not in sent
+
+    asyncio.run(exercise())
+
